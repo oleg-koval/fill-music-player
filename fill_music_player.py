@@ -39,6 +39,7 @@ except ImportError:
 # ---------------------------------------------------------------------------
 
 def parse_args(argv=None):
+    """Parse command-line arguments."""
     p = argparse.ArgumentParser(
         prog="fill-music-player",
         description="Fill a portable music player with a curated random selection.",
@@ -98,57 +99,54 @@ def get_tags(path: Path):
         return None
     try:
         return MutagenFile(path, easy=False)
-    except Exception:
+    except (OSError, ValueError, RuntimeError):
         return None
 
 
-def extract_artist_album(path: Path, source_root: Path, tags) -> tuple[str, str]:
-    """Extract artist + album from tags, falling back to folder name heuristics.
+def _read_tag(tags, keys):
+    """Read the first non-empty value from a list of tag keys."""
+    for key in keys:
+        val = tags.get(key)
+        if val is None:
+            continue
+        text = str(val.text[0] if hasattr(val, "text") else val[0]).strip()
+        if text:
+            return text
+    return None
 
-    Folder heuristic assumes: source/genre/Artist - Album/track.ext
-    """
-    artist = album = None
 
-    if tags:
-        # ID3 (MP3)
-        for key in ("TPE1", "TPE2"):
-            v = tags.get(key)
-            if v:
-                artist = str(v.text[0] if hasattr(v, "text") else v).strip()
-                break
-        v = tags.get("TALB")
-        if v:
-            album = str(v.text[0] if hasattr(v, "text") else v).strip()
+def _artist_album_from_tags(tags) -> tuple[str | None, str | None]:
+    """Extract artist and album from ID3/MP4/WMA tags."""
+    if not tags:
+        return None, None
+    artist = _read_tag(tags, ("TPE1", "TPE2", "\xa9ART", "aART", "Author"))
+    album = _read_tag(tags, ("TALB", "\xa9alb", "WM/AlbumTitle"))
+    return artist, album
 
-        # MP4/AAC
-        if not artist:
-            for key in ("\xa9ART", "aART"):
-                if key in tags:
-                    artist = str(tags[key][0]).strip()
-                    break
-        if not album and "\xa9alb" in tags:
-            album = str(tags["\xa9alb"][0]).strip()
 
-        # WMA / ASF
-        if not artist and "Author" in tags:
-            artist = str(tags["Author"][0]).strip()
-        if not album and "WM/AlbumTitle" in tags:
-            album = str(tags["WM/AlbumTitle"][0]).strip()
-
-    # Fallback: parse from folder structure
+def _artist_album_from_path(path: Path, source_root: Path) -> tuple[str | None, str | None]:
+    """Infer artist and album from folder structure (genre/Artist - Album/track)."""
     parts = path.relative_to(source_root).parts
-    if not artist and len(parts) >= 2:
+    artist = album = None
+    if len(parts) >= 2:
         folder = parts[1]
         m = re.match(r"^(.+?)\s*[-\u2013]\s*(.+)$", folder)
         if m:
-            artist = m.group(1).strip()
-            album = m.group(2).strip()
+            artist, album = m.group(1).strip(), m.group(2).strip()
         else:
             artist = folder
-
     if not album and len(parts) >= 3:
         album = parts[2]
+    return artist, album
 
+
+def extract_artist_album(path: Path, source_root: Path, tags) -> tuple[str, str]:
+    """Extract artist + album from tags, falling back to folder name heuristics."""
+    artist, album = _artist_album_from_tags(tags)
+    if not artist or not album:
+        path_artist, path_album = _artist_album_from_path(path, source_root)
+        artist = artist or path_artist
+        album = album or path_album
     return (artist or "Unknown", album or "Unknown")
 
 
@@ -164,12 +162,28 @@ def normalise_artist_key(artist: str) -> str:
 # Scanning
 # ---------------------------------------------------------------------------
 
+def _is_eligible(fpath: Path, supported_exts: set[str],
+                  min_bytes: float, max_bytes: float) -> int | None:
+    """Return file size in bytes if eligible, None otherwise."""
+    if fpath.suffix.lower() not in supported_exts:
+        return None
+    try:
+        size = fpath.stat().st_size
+    except OSError:
+        return None
+    if size < min_bytes or size > max_bytes:
+        return None
+    return size
+
+
 def scan_files(source: Path, supported_exts: set[str], skip_dirs: set[str],
                max_file_mb: float, min_file_kb: float) -> list[dict]:
     """Walk source directory and collect all eligible audio files."""
     print("Scanning music collection ...")
     files = []
     genres_seen = set()
+    min_bytes = min_file_kb * 1024
+    max_bytes = max_file_mb * 1024**2
 
     for genre_dir in sorted(source.iterdir()):
         if not genre_dir.is_dir():
@@ -186,21 +200,12 @@ def scan_files(source: Path, supported_exts: set[str], skip_dirs: set[str],
 
             for fn in filenames:
                 fpath = root_path / fn
-                if fpath.suffix.lower() not in supported_exts:
-                    continue
-                try:
-                    size = fpath.stat().st_size
-                except OSError:
-                    continue
-
-                if size > max_file_mb * 1024**2:
-                    continue
-                if size < min_file_kb * 1024:
+                size = _is_eligible(fpath, supported_exts, min_bytes, max_bytes)
+                if size is None:
                     continue
 
                 tags = get_tags(fpath)
                 artist, album = extract_artist_album(fpath, source, tags)
-
                 files.append({
                     "path": fpath,
                     "size": size,
@@ -218,68 +223,66 @@ def scan_files(source: Path, supported_exts: set[str], skip_dirs: set[str],
 # Curation
 # ---------------------------------------------------------------------------
 
+def _pick_from_genre(gfiles: list[dict], budget: int,
+                     max_per_artist: int, max_per_album: int) -> list[dict]:
+    """Pick tracks from a single genre within byte budget and diversity caps."""
+    random.shuffle(gfiles)
+    artist_count: dict[str, int] = defaultdict(int)
+    album_count: dict[tuple, int] = defaultdict(int)
+    picks = []
+    used_bytes = 0
+
+    for track in gfiles:
+        ak = track["artist_key"]
+        alb_key = (ak, track["album"])
+        if artist_count[ak] >= max_per_artist:
+            continue
+        if album_count[alb_key] >= max_per_album:
+            continue
+        if used_bytes + track["size"] > budget:
+            continue
+        picks.append(track)
+        artist_count[ak] += 1
+        album_count[alb_key] += 1
+        used_bytes += track["size"]
+
+    return picks
+
+
+def _trim_to_budget(tracks: list[dict], target_bytes: int) -> list[dict]:
+    """Take tracks in order until target_bytes is reached."""
+    total = 0
+    result = []
+    for track in tracks:
+        if total + track["size"] > target_bytes:
+            continue
+        result.append(track)
+        total += track["size"]
+    return result
+
+
 def curate(files: list[dict], target_bytes: int,
            max_per_artist: int, max_per_album: int) -> list[dict]:
-    """DJ-balanced curation.
-
-    Strategy:
-    1. Split byte budget proportionally across genres (by track count)
-    2. Within each genre: shuffle, then pick respecting artist/album caps
-    3. Globally re-shuffle for interleaved playback order
-    4. Trim to target_bytes
-    """
+    """DJ-balanced curation across genres with artist/album diversity caps."""
     by_genre: dict[str, list[dict]] = defaultdict(list)
     for f in files:
         by_genre[f["genre"]].append(f)
 
     total_tracks = len(files)
-    per_genre_budget = {
-        genre: int(target_bytes * len(gfiles) / total_tracks)
-        for genre, gfiles in by_genre.items()
-    }
-
     selected: list[dict] = []
 
     for genre, gfiles in sorted(by_genre.items()):
-        budget = per_genre_budget[genre]
-        random.shuffle(gfiles)
-
-        artist_count: dict[str, int] = defaultdict(int)
-        album_count: dict[tuple, int] = defaultdict(int)
-        genre_bytes = 0
-        genre_picks = []
-
-        for f in gfiles:
-            ak = f["artist_key"]
-            alb_key = (ak, f["album"])
-
-            if artist_count[ak] >= max_per_artist:
-                continue
-            if album_count[alb_key] >= max_per_album:
-                continue
-            if genre_bytes + f["size"] > budget:
-                continue
-
-            genre_picks.append(f)
-            artist_count[ak] += 1
-            album_count[alb_key] += 1
-            genre_bytes += f["size"]
-
-        selected.extend(genre_picks)
-        print(f"  {genre:22s}  {len(genre_picks):3d} tracks  "
+        budget = int(target_bytes * len(gfiles) / total_tracks)
+        picks = _pick_from_genre(gfiles, budget, max_per_artist, max_per_album)
+        selected.extend(picks)
+        genre_bytes = sum(t["size"] for t in picks)
+        print(f"  {genre:22s}  {len(picks):3d} tracks  "
               f"({genre_bytes / 1024**2:6.1f} MB)")
 
     random.shuffle(selected)
-
-    total = 0
-    final = []
-    for f in selected:
-        if total + f["size"] > target_bytes:
-            continue
-        final.append(f)
-        total += f["size"]
-
-    print(f"\n  Selected {len(final)} tracks  ({total / 1024**2:.1f} MB)")
+    final = _trim_to_budget(selected, target_bytes)
+    total_mb = sum(t["size"] for t in final) / 1024**2
+    print(f"\n  Selected {len(final)} tracks  ({total_mb:.1f} MB)")
     return final
 
 
@@ -303,6 +306,7 @@ def dest_path(src: Path, source_root: Path, dest_root: Path) -> Path:
 
 def copy_files(tracks: list[dict], source_root: Path, dest_root: Path,
                dry_run: bool = False):
+    """Copy selected tracks to the destination, preserving folder structure."""
     label = "DRY RUN - " if dry_run else ""
     print(f"\n{label}Copying {len(tracks)} tracks to {dest_root} ...\n")
 
@@ -328,7 +332,7 @@ def copy_files(tracks: list[dict], source_root: Path, dest_root: Path,
                 shutil.copy2(f["path"], dst)
             copied += 1
             total_bytes += f["size"]
-        except Exception as e:
+        except OSError as e:
             print(f"    ERROR: {e}")
             errors += 1
 
@@ -346,6 +350,7 @@ def copy_files(tracks: list[dict], source_root: Path, dest_root: Path,
 # ---------------------------------------------------------------------------
 
 def main(argv=None):
+    """Entry point: parse args, scan, curate, and copy."""
     args = parse_args(argv)
 
     source = Path(args.source).expanduser().resolve()
