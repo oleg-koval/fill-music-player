@@ -1,0 +1,38 @@
+[project]
+name = "fill-music-player"
+version = "0.1.0"
+description = "Fill a portable music player with a curated, DJ-balanced random selection from your music library"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.11"
+authors = [
+    { name = "Oleg Koval" },
+]
+keywords = ["music", "walkman", "ipod", "mp3", "nas", "curation", "dj", "portable-player"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Multimedia :: Sound/Audio",
+]
+dependencies = [
+    "mutagen>=1.47",
+]
+
+[project.scripts]
+fill-music-player = "fill_music_player:main"
+
+[project.urls]
+Homepage = "https://github.com/oleg-koval/fill-music-player"
+Repository = "https://github.com/oleg-koval/fill-music-player"
+Issues = "https://github.com/oleg-koval/fill-music-player/issues"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
