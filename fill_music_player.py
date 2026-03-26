@@ -176,46 +176,53 @@ def _is_eligible(fpath: Path, supported_exts: set[str],
     return size
 
 
+def _make_track_entry(fpath: Path, size: int, genre: str, source: Path) -> dict:
+    """Build a track metadata dict from a file path."""
+    tags = get_tags(fpath)
+    artist, album = extract_artist_album(fpath, source, tags)
+    return {
+        "path": fpath,
+        "size": size,
+        "genre": genre,
+        "artist": artist,
+        "artist_key": normalise_artist_key(artist),
+        "album": album,
+    }
+
+
+def _scan_genre(genre_dir: Path, source: Path, supported_exts: set[str],
+                min_bytes: float, max_bytes: float) -> list[dict]:
+    """Scan a single genre directory for eligible tracks."""
+    tracks = []
+    for root, dirs, filenames in os.walk(genre_dir):
+        dirs[:] = [d for d in dirs if d.lower() not in ("incomplete",)]
+        root_path = Path(root)
+        for fn in filenames:
+            fpath = root_path / fn
+            size = _is_eligible(fpath, supported_exts, min_bytes, max_bytes)
+            if size is not None:
+                tracks.append(_make_track_entry(fpath, size, genre_dir.name, source))
+    return tracks
+
+
 def scan_files(source: Path, supported_exts: set[str], skip_dirs: set[str],
                max_file_mb: float, min_file_kb: float) -> list[dict]:
     """Walk source directory and collect all eligible audio files."""
     print("Scanning music collection ...")
     files = []
-    genres_seen = set()
     min_bytes = min_file_kb * 1024
     max_bytes = max_file_mb * 1024**2
 
     for genre_dir in sorted(source.iterdir()):
         if not genre_dir.is_dir():
             continue
-        genre = genre_dir.name
-        if genre in skip_dirs:
-            print(f"  skip {genre}/")
+        if genre_dir.name in skip_dirs:
+            print(f"  skip {genre_dir.name}/")
             continue
-        genres_seen.add(genre)
+        files.extend(_scan_genre(genre_dir, source, supported_exts, min_bytes, max_bytes))
 
-        for root, dirs, filenames in os.walk(genre_dir):
-            dirs[:] = [d for d in dirs if d.lower() not in ("incomplete",)]
-            root_path = Path(root)
-
-            for fn in filenames:
-                fpath = root_path / fn
-                size = _is_eligible(fpath, supported_exts, min_bytes, max_bytes)
-                if size is None:
-                    continue
-
-                tags = get_tags(fpath)
-                artist, album = extract_artist_album(fpath, source, tags)
-                files.append({
-                    "path": fpath,
-                    "size": size,
-                    "genre": genre,
-                    "artist": artist,
-                    "artist_key": normalise_artist_key(artist),
-                    "album": album,
-                })
-
-    print(f"  Found {len(files)} candidate tracks across {len(genres_seen)} genre dirs")
+    genres_found = len({f["genre"] for f in files})
+    print(f"  Found {len(files)} candidate tracks across {genres_found} genre dirs")
     return files
 
 
