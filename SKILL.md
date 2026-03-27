@@ -50,3 +50,49 @@ Run `fill-music-player --help` for all options.
 | iPod (classic/nano) | `mp3,m4a,aac` |
 | Generic USB player | `mp3` |
 | Any modern player | `mp3,m4a,wma,aac,ogg,flac` |
+
+## Edge Cases and Troubleshooting
+
+| Situation | What happens | Fix |
+|-----------|-------------|-----|
+| NAS disconnects mid-copy | Copy fails for that file, logged as error, continues with next track | Re-run; already-copied files are skipped (`if not dst.exists()`) |
+| Source has only FLAC/lossless | 0 files selected (FLAC not in default formats) | Use `--formats flac` or `--formats mp3,flac` |
+| FAT32 filename too long or illegal chars | Filenames are sanitized: `<>:"/\|?*` replaced with `_`, truncated to 80 chars | Automatic — no action needed |
+| Mixed/broken ID3 tags | Falls back to folder name parsing (`Genre/Artist - Album/track.mp3`) | Works transparently; folder structure is the reliable fallback |
+| Very large files (DJ mixes, radio shows) | Skipped by default (>20 MB) | Adjust with `--max-file-mb 50` to include mixes |
+| Tiny files (jingles, corrupt) | Skipped by default (<300 KB) | Adjust with `--min-file-kb 100` to be more permissive |
+| One artist dominates the library | Capped at 4 tracks per artist, 3 per album | Lower with `--max-per-artist 2` for more variety |
+| Empty genre directories | Silently skipped, no error | Normal behavior |
+| Destination already has files | Existing files are not overwritten or deleted; new tracks added alongside | Clear destination first if you want a fresh set |
+| SMB/NFS mount is slow | Scanning with mutagen tag reading can take 5-10 min for large libraries | Expected; the dry-run output appears once scanning completes |
+
+## Real-World Example
+
+Filling a **Sony Walkman NWZ-B183F (4 GB)** from a **Synology DS918+ NAS** with ~9,000 tracks across blues, funk, hip-hop, soul, IDM, dubstep, dub, indie, and post-rock:
+
+```bash
+# Step 1: Preview
+fill-music-player \
+  --source /Volumes/music \
+  --dest /Volumes/WALKMAN/MUSIC \
+  --skip-dirs "jingles,!recordings,!restored,dubrecords" \
+  --formats mp3,m4a,wma \
+  --dry-run
+
+# Output:
+#   Found 8914 candidate tracks across 14 genres
+#   Funk     →  86 tracks  (440.8 MB)
+#   blues    →  38 tracks  (316.7 MB)
+#   hiphop   →  33 tracks  (234.7 MB)
+#   ...
+#   Selected 348 tracks  (2473.0 MB)
+
+# Step 2: Copy
+fill-music-player \
+  --source /Volumes/music \
+  --dest /Volumes/WALKMAN/MUSIC \
+  --skip-dirs "jingles,!recordings,!restored,dubrecords" \
+  --formats mp3,m4a,wma
+```
+
+Result: 348 tracks, 2.4 GB, balanced across 14 genres with max 4 tracks per artist. Artists included Fela Kuti, ZZ Top, Mobb Deep, Gregory Porter, Tinariwen, Chick Corea, Hudson Mohawke, and Funkadelic. Total copy time over SMB: ~12 minutes.
